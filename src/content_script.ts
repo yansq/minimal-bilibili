@@ -36,6 +36,11 @@ const TYPE_LIST = {
   VIDEO: '8',
   BANGUMI: '512,4097,4098,4099,4100,4101',
 }
+const MAX_RECOMMEND_ITEMS = 9
+const WATCH_LATER_URL = 'https://www.bilibili.com/watchlater/list?spm_id_from=333.1007.0.0#/list'
+const HISTORY_CURSOR_URL = 'https://api.bilibili.com/x/web-interface/history/cursor'
+const HISTORY_PAGE_SIZE = 30
+const MAX_HISTORY_PAGES = 20
 
 interface State {
   currentPlayer: Player|null
@@ -72,6 +77,8 @@ loadSettings().then((settings) => {
     // remove placeholder and title
     searchInput.placeholder = ''
     searchInput.title = ''
+    initSearchFocusProxy(searchInput)
+    initHomeSummaryPanel()
     // focus
     if (settings.autoFocusSearchBar) {
       searchInput.focus()
@@ -201,6 +208,26 @@ loadSettings().then((settings) => {
       state.currentPlayer = player
     })
 
+    // add video to watch later
+    delegate(container.get(0) as HTMLDivElement, '.left-column .dynamic-item .watch-later-button', 'click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const button = (e.target as HTMLElement).closest('.watch-later-button') as HTMLButtonElement|null
+      if (!button) return
+      const bvid = button.dataset.bvid
+      if (!bvid || button.disabled) return
+
+      setWatchLaterButtonState(button, 'saving')
+      try {
+        await addToWatchLater(bvid)
+        setWatchLaterButtonState(button, 'saved')
+      } catch (error) {
+        console.error('add to watch later failed', error)
+        setWatchLaterButtonState(button, 'error', error instanceof Error ? error.message : '保存失败')
+      }
+    })
+
     // load more when scroll to bottom
     detectScrollToBottom(async () => {
       if (loadMoreFuncs.length === 0) return
@@ -294,6 +321,32 @@ interface ColumnState {
   lastDynamicId: string|null
 }
 
+interface HistoryCursor {
+  max: number
+  view_at: number
+  business: string
+}
+
+interface HistoryItem {
+  duration: number
+  progress: number
+  view_at: number
+}
+
+interface HistoryData {
+  code: number
+  message: string
+  data: {
+    cursor: HistoryCursor
+    list: HistoryItem[]
+  }
+}
+
+interface TodayWatchStats {
+  count: number
+  seconds: number
+}
+
 function initDynamicsColumn(container: Cash, name: string, title: string, uid: string, type_list: string, blockedWords: string[]) {
 
   const column = $(`<section class="${name}-column">`).appendTo(container)
@@ -357,7 +410,10 @@ async function loadDynamics(state: ColumnState, container: Cash, uid: string, ty
                 ${spanIcon('thumb-up')}<span class="value">${card.stat.like}</span>
                 ${spanIcon('coin-yuan')}<span class="value">${card.stat.coin}</span>
                 ${spanIcon('star')}<span class="value">${card.stat.favorite}</span>
-              </span>
+              </span
+              ><button type="button" class="watch-later-button" data-bvid="${desc.bvid}" title="保存到稍后再看">
+                ${spanIcon('clock')}<span>稍后再看</span>
+              </button>
             </div>
             <div class="desc">${description}</div>
           </div>
@@ -402,6 +458,45 @@ function spanIcon(icon: string) {
   return `<span class="icon icon--tabler icon--tabler--${icon}"></span>`
 }
 
+function initSearchFocusProxy(searchInput: HTMLInputElement) {
+  const searchContainer = $(searchInput).closest('.center-search-container').get(0)
+  if (!searchContainer || searchContainer.dataset.minimalBilibiliFocusProxy === '1') return
+
+  searchContainer.dataset.minimalBilibiliFocusProxy = '1'
+  searchContainer.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement
+    if (target.closest('button, a')) return
+    searchInput.focus()
+  })
+}
+
+function initHomeSummaryPanel() {
+  if ($('.home-summary-panel').length > 0) return
+
+  const panel = $(`
+    <div class="home-summary-panel">
+      <a class="watch-later-page-link button" href="${WATCH_LATER_URL}">
+        ${spanIcon('clock')}<span>稍后再看</span>
+      </a>
+      <div class="today-watch-stats" title="按 B 站观看历史统计">
+        ${spanIcon('clock')}<span>今日已看：统计中...</span>
+      </div>
+    </div>
+  `).appendTo(document.body)
+
+  const statsEl = panel.find('.today-watch-stats span:last-child').get(0)
+  if (!statsEl) return
+
+  loadTodayWatchStats()
+    .then((stats) => {
+      statsEl.textContent = `今日已看：${stats.count} 个 / ${formatWatchSeconds(stats.seconds)}`
+    })
+    .catch((error) => {
+      console.error('load today watch stats failed', error)
+      statsEl.textContent = '今日已看：统计失败'
+    })
+}
+
 function divPreview(img: string, desc: string) {
   return `
     <div class="preview">
@@ -411,6 +506,124 @@ function divPreview(img: string, desc: string) {
       </div>
     </div>
   `
+}
+
+async function loadTodayWatchStats(): Promise<TodayWatchStats> {
+  const startOfToday = new Date()
+  startOfToday.setHours(0, 0, 0, 0)
+  const todayStartSeconds = Math.floor(startOfToday.getTime() / 1000)
+  let cursor: HistoryCursor|null = null
+  let count = 0
+  let seconds = 0
+
+  for (let page = 0; page < MAX_HISTORY_PAGES; page++) {
+    const data: HistoryData = await fetchHistoryPage(cursor)
+    const items = data.data?.list || []
+    if (items.length === 0) break
+
+    for (const item of items) {
+      if (item.view_at < todayStartSeconds) {
+        return { count, seconds }
+      }
+
+      count++
+      seconds += watchedSecondsFromHistoryItem(item)
+    }
+
+    cursor = data.data.cursor
+    if (!cursor || cursor.view_at < todayStartSeconds) break
+  }
+
+  return { count, seconds }
+}
+
+async function fetchHistoryPage(cursor: HistoryCursor|null): Promise<HistoryData> {
+  const url = new URL(HISTORY_CURSOR_URL)
+  url.searchParams.set('ps', String(HISTORY_PAGE_SIZE))
+  url.searchParams.set('type', 'archive')
+  if (cursor) {
+    url.searchParams.set('max', String(cursor.max))
+    url.searchParams.set('view_at', String(cursor.view_at))
+    url.searchParams.set('business', cursor.business)
+  }
+
+  const resp = await fetch(url.toString(), {
+    credentials: 'include',
+  })
+  const data = await resp.json()
+  if (data.code !== 0) {
+    throw new Error(data.message || '获取观看历史失败')
+  }
+  return data
+}
+
+function watchedSecondsFromHistoryItem(item: HistoryItem) {
+  if (item.progress === -1) return item.duration
+  if (item.duration > 0) return Math.min(item.progress, item.duration)
+  return Math.max(item.progress, 0)
+}
+
+function formatWatchSeconds(seconds: number) {
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} 分钟`
+
+  const hours = Math.floor(minutes / 60)
+  const restMinutes = minutes % 60
+  if (restMinutes === 0) return `${hours} 小时`
+  return `${hours} 小时 ${restMinutes} 分钟`
+}
+
+function getBilibiliCsrfToken() {
+  const match = document.cookie.match(/(?:^|;\s*)bili_jct=([^;]+)/)
+  return match ? decodeURIComponent(match[1]) : null
+}
+
+async function addToWatchLater(bvid: string) {
+  const csrf = getBilibiliCsrfToken()
+  if (!csrf) {
+    throw new Error('未找到登录凭据')
+  }
+
+  const body = new URLSearchParams({
+    bvid,
+    csrf,
+  })
+  const resp = await fetch('https://api.bilibili.com/x/v2/history/toview/add', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  })
+  const result = await resp.json()
+  if (result.code !== 0) {
+    throw new Error(result.message || '保存失败')
+  }
+}
+
+function setWatchLaterButtonState(button: HTMLButtonElement, state: 'idle'|'saving'|'saved'|'error', message?: string) {
+  const label = button.querySelector('span:last-child')
+  button.classList.remove('is-saving', 'is-saved', 'is-error')
+  button.disabled = state === 'saving' || state === 'saved'
+
+  if (state === 'saving') {
+    button.classList.add('is-saving')
+    if (label) label.textContent = '保存中'
+    button.title = '正在保存到稍后再看'
+  } else if (state === 'saved') {
+    button.classList.add('is-saved')
+    if (label) label.textContent = '已保存'
+    button.title = '已保存到稍后再看'
+  } else if (state === 'error') {
+    button.classList.add('is-error')
+    if (label) label.textContent = '重试'
+    button.title = message || '保存失败，点击重试'
+    button.disabled = false
+  } else {
+    if (label) label.textContent = '稍后再看'
+    button.title = '保存到稍后再看'
+  }
 }
 
 const scrollBottomOffset = 5;
@@ -437,7 +650,8 @@ function observeRecommend(blockedWords: string[]) {
 
   const targetNode = document.querySelector('.recommended-container_floor-aside .container') as HTMLDivElement
 
-  const debouncedRemoveAds = runOnceInTime(() => removeAdsAndBlockedWordsIn(targetNode, blockedWords), 2000)
+  const debouncedCleanRecommend = runOnceInTime(() => cleanRecommendItems(targetNode, blockedWords), 2000)
+  cleanRecommendItems(targetNode, blockedWords)
 
   // Callback function to execute when mutations are observed
   const callback: MutationCallback = (mutationsList: MutationRecord[], observer: MutationObserver) => {
@@ -445,7 +659,7 @@ function observeRecommend(blockedWords: string[]) {
       if (mutation.type === 'childList') {
         // do something because child elements have changed
         // console.log('A child node has been added or removed.')
-        debouncedRemoveAds()
+        debouncedCleanRecommend()
       }
     }
   };
@@ -496,6 +710,19 @@ function removeAdsAndBlockedWordsIn(el: HTMLElement, blockedWords: string[]) {
       }
     })
   }
+}
+
+function cleanRecommendItems(el: HTMLElement, blockedWords: string[]) {
+  removeAdsAndBlockedWordsIn(el, blockedWords)
+  limitRecommendItems(el, MAX_RECOMMEND_ITEMS)
+}
+
+function limitRecommendItems(el: HTMLElement, limit: number) {
+  $(el).children().each((i, child) => {
+    if (i >= limit) {
+      child.remove()
+    }
+  })
 }
 
 function removeVideoCardParent(el: HTMLElement) {
