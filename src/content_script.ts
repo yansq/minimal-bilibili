@@ -1,8 +1,6 @@
 import $, { Cash } from 'cash-dom';
 import delegate from 'delegate-it';
 
-import { parseBV } from './bilibili';
-import { Player } from './player';
 import { loadSettings } from './settings';
 import { colors, getLogger } from './utils/log';
 import { formatDate, formatDuration, hoursOrMinutesFrom } from './utils/misc';
@@ -39,17 +37,11 @@ const TYPE_LIST = {
 const MAX_RECOMMEND_ITEMS = 9
 const WATCH_LATER_URL = 'https://www.bilibili.com/watchlater/list?spm_id_from=333.1007.0.0#/list'
 const HISTORY_CURSOR_URL = 'https://api.bilibili.com/x/web-interface/history/cursor'
+const WATCH_LATER_API_URL = 'https://api.bilibili.com/x/v2/history/toview'
+const WATCH_LATER_ADD_API_URL = 'https://api.bilibili.com/x/v2/history/toview/add'
+const WATCH_LATER_REMOVE_API_URL = 'https://api.bilibili.com/x/v2/history/toview/del'
 const HISTORY_PAGE_SIZE = 30
 const MAX_HISTORY_PAGES = 20
-
-interface State {
-  currentPlayer: Player|null
-  quality?: number
-}
-
-const state: State = {
-  currentPlayer: null,
-}
 
 /* main */
 
@@ -107,106 +99,15 @@ loadSettings().then((settings) => {
     // create container
     const dynamicsParent = $('.feed2')
     const container = $('<div class="dynamics-container">').prependTo(dynamicsParent)
+    const watchLaterState = createWatchLaterState()
 
     // init columns
     const loadMoreFuncs: Array<() => Promise<void>> = []
 
 
-    const loadMoreVideos = initDynamicsColumn(container, 'left', '动态', uid, TYPE_LIST.VIDEO, blockedWords)
+    const loadMoreVideos = initDynamicsColumn(container, 'left', '动态', uid, TYPE_LIST.VIDEO, blockedWords, watchLaterState)
     if (settings.autoLoadVideoColumn)
       loadMoreFuncs.push(loadMoreVideos)
-
-    // create player dialog
-    const playerDialog = document.createElement('dialog')
-    playerDialog.classList.add('player-dialog')
-    playerDialog.innerHTML = `
-      <div class="player-container"></div>
-      <div class="player-panel">
-        <div class="video-info">
-        </div>
-        <div class="player-controls">
-          <div class="item volume-slider">
-            <label for="v-player-volume">音量</label>
-            <input type="range" id="v-player-volume">
-          </div>
-          <div class="item quality-switcher">
-            <label for="v-player-quality">画质</label>
-            <select id="v-player-quality"></select>
-          </div>
-        </div>
-      </div>
-      <form method="dialog" class="top-right">
-        <button class="close-button">${spanIcon('x')}</button>
-      </form>
-    `
-    document.body.appendChild(playerDialog)
-
-    // player controls
-    delegate(playerDialog, '#v-player-volume', 'input', (e) => {
-      const volume = (e.target as HTMLInputElement).value
-      if (state.currentPlayer) {
-        state.currentPlayer.setVolume(parseInt(volume))
-        state.currentPlayer.savePreference()
-      }
-    })
-    delegate(playerDialog, '#v-player-quality', 'change', (e) => {
-      console.log('change quality', (e.target as HTMLSelectElement).value)
-      if (state.currentPlayer) {
-        state.quality = parseInt((e.target as HTMLSelectElement).value)
-        state.currentPlayer.switchQuality(state.quality)
-      }
-    })
-
-    playerDialog.addEventListener('close', () => {
-      if (state.currentPlayer) {
-        state.currentPlayer.destroy()
-      }
-    })
-
-    playerDialog.addEventListener('click', (e) => {
-      // close playerDialog if click on the backdrop
-      if (playerDialog.open && e.target === playerDialog) {
-        playerDialog.close()
-      }
-    })
-
-    // listen to video link click
-    delegate(container.get(0) as HTMLDivElement, '.left-column .dynamic-item .title a.open-player', 'click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      // mark visited
-      (e.target as HTMLLinkElement).classList.add('visited');
-
-      playerDialog.showModal()
-      if (state.currentPlayer) {
-        state.currentPlayer.destroy()
-      }
-
-      const url = (e.target as HTMLLinkElement).href
-      const resp = await fetch(url)
-      const html = await resp.text()
-      const playInfo = await parseBV(html, url)
-      const $playerContainer = $('.player-container')
-
-      // create player
-      const player = new Player(playInfo, state.quality)
-      $playerContainer.append(player.el)
-      // focus on video so that user can use keyboard to control
-      player.elVideo.focus()
-
-      // update player controls
-      player.initVolumeSlider($('#v-player-volume'))
-      player.initQualitySwitcher($('#v-player-quality'))
-
-      // add video info
-      const videoInfoContent = (e.target as HTMLLinkElement).parentElement!.parentElement!
-      $('.player-panel .video-info').empty().append(
-        $(videoInfoContent).clone()
-      )
-
-      // update player to state
-      state.currentPlayer = player
-    })
 
     // add video to watch later
     delegate(container.get(0) as HTMLDivElement, '.left-column .dynamic-item .watch-later-button', 'click', async (e) => {
@@ -216,15 +117,26 @@ loadSettings().then((settings) => {
       const button = (e.target as HTMLElement).closest('.watch-later-button') as HTMLButtonElement|null
       if (!button) return
       const bvid = button.dataset.bvid
+      const aid = button.dataset.aid
       if (!bvid || button.disabled) return
 
-      setWatchLaterButtonState(button, 'saving')
+      const shouldRemove = button.dataset.watchLaterState === 'saved'
+      setWatchLaterButtonState(button, shouldRemove ? 'removing' : 'saving')
       try {
-        await addToWatchLater(bvid)
-        setWatchLaterButtonState(button, 'saved')
+        if (shouldRemove) {
+          if (!aid) throw new Error('缺少视频 aid，无法取消保存')
+          await removeFromWatchLater(aid)
+          unmarkBvidAsWatchLater(watchLaterState, bvid)
+          setWatchLaterButtonState(button, 'idle')
+        } else {
+          await addToWatchLater(bvid)
+          markBvidAsWatchLater(watchLaterState, bvid)
+          setWatchLaterButtonState(button, 'saved')
+        }
       } catch (error) {
-        console.error('add to watch later failed', error)
-        setWatchLaterButtonState(button, 'error', error instanceof Error ? error.message : '保存失败')
+        console.error('update watch later failed', error)
+        const fallbackMessage = shouldRemove ? '取消保存失败' : '保存失败'
+        setWatchLaterButtonState(button, 'error', error instanceof Error ? error.message : fallbackMessage)
       }
     })
 
@@ -281,6 +193,8 @@ interface DynamicData {
 }
 
 interface VideoCard {
+  // video av id, used by some history/watchlater APIs
+  aid: number
   // 【游研社】在末日生存如何解决“住房”问题？
   title: string
   // "在当今的文化作品中，末日题材已越发被大家熟悉。丧尸、核平、冻土、水灾......在这些诸多的末日题材中，总有那么一群生存大师，即便身处的环境再差，也要想办法给自己解决“住房”问题。今天我们就来和大家聊聊末日生存该如何解决“住”的问题。"
@@ -347,7 +261,25 @@ interface TodayWatchStats {
   seconds: number
 }
 
-function initDynamicsColumn(container: Cash, name: string, title: string, uid: string, type_list: string, blockedWords: string[]) {
+interface WatchLaterItem {
+  bvid: string
+}
+
+interface WatchLaterData {
+  code: number
+  message: string
+  data: {
+    list?: WatchLaterItem[]
+  }
+}
+
+interface WatchLaterState {
+  bvids: Set<string>|null
+  pendingSavedBvids: Set<string>
+  promise: Promise<Set<string>>
+}
+
+function initDynamicsColumn(container: Cash, name: string, title: string, uid: string, type_list: string, blockedWords: string[], watchLaterState: WatchLaterState) {
 
   const column = $(`<section class="${name}-column">`).appendTo(container)
   $('<div class="section-title">').text(title).appendTo(column)
@@ -362,17 +294,17 @@ function initDynamicsColumn(container: Cash, name: string, title: string, uid: s
 
   const loadMoreFunc = async () => {
     loadMore.attr('disabled', 'disabled')
-    await loadDynamics(state, items, uid, type_list, blockedWords)
+    await loadDynamics(state, items, uid, type_list, blockedWords, watchLaterState)
     loadMore.removeAttr('disabled')
   }
 
   loadMore.on('click', loadMoreFunc)
 
-  loadDynamics(state, items, uid, type_list, blockedWords)
+  loadDynamics(state, items, uid, type_list, blockedWords, watchLaterState)
   return loadMoreFunc
 }
 
-async function loadDynamics(state: ColumnState, container: Cash, uid: string, type_list: string, blockedWords: string[]) {
+async function loadDynamics(state: ColumnState, container: Cash, uid: string, type_list: string, blockedWords: string[], watchLaterState: WatchLaterState) {
 
   return fetchDynamics(uid, state.lastDynamicId, type_list).then(data => {
     // console.log('data', data)
@@ -400,7 +332,7 @@ async function loadDynamics(state: ColumnState, container: Cash, uid: string, ty
           ${divPreview(card.pic, description)}
           <div class="content">
             <div class="title">
-              <a href="https://www.bilibili.com/video/${desc.bvid}" target="_blank" class="open-player">${card.title}</a>
+              <a href="https://www.bilibili.com/video/${desc.bvid}" target="_blank">${card.title}</a>
             </div>
             <div class="meta">
               <span class="with-sep">${spanIcon('user')}<a href="https://space.bilibili.com/${desc.user_profile?.info.uid}" target="_blank">${desc.user_profile?.info.uname}</a></span
@@ -411,7 +343,7 @@ async function loadDynamics(state: ColumnState, container: Cash, uid: string, ty
                 ${spanIcon('coin-yuan')}<span class="value">${card.stat.coin}</span>
                 ${spanIcon('star')}<span class="value">${card.stat.favorite}</span>
               </span
-              ><button type="button" class="watch-later-button" data-bvid="${desc.bvid}" title="保存到稍后再看">
+              ><button type="button" class="watch-later-button" data-bvid="${desc.bvid}" data-aid="${card.aid}" title="保存到稍后再看">
                 ${spanIcon('clock')}<span>稍后再看</span>
               </button>
             </div>
@@ -451,6 +383,7 @@ async function loadDynamics(state: ColumnState, container: Cash, uid: string, ty
 
       state.lastDynamicId = desc.dynamic_id_str
     }
+    syncWatchLaterButtons(container, watchLaterState)
   })
 }
 
@@ -573,6 +506,68 @@ function formatWatchSeconds(seconds: number) {
   return `${hours} 小时 ${restMinutes} 分钟`
 }
 
+function createWatchLaterState(): WatchLaterState {
+  const state: WatchLaterState = {
+    bvids: null,
+    pendingSavedBvids: new Set(),
+    promise: Promise.resolve(new Set<string>()),
+  }
+
+  state.promise = fetchWatchLaterBvids()
+    .then((bvids) => {
+      for (const bvid of state.pendingSavedBvids) {
+        bvids.add(bvid)
+      }
+      state.bvids = bvids
+      return bvids
+    })
+    .catch((error) => {
+      console.error('load watch later list failed', error)
+      state.bvids = new Set(state.pendingSavedBvids)
+      return state.bvids
+    })
+
+  return state
+}
+
+async function fetchWatchLaterBvids() {
+  const resp = await fetch(WATCH_LATER_API_URL, {
+    credentials: 'include',
+  })
+  const result: WatchLaterData = await resp.json()
+  if (result.code !== 0) {
+    throw new Error(result.message || '获取稍后再看列表失败')
+  }
+
+  return new Set((result.data.list || []).map(item => item.bvid).filter(Boolean))
+}
+
+function syncWatchLaterButtons(container: Cash, watchLaterState: WatchLaterState) {
+  watchLaterState.promise
+    .then((bvids) => {
+      container.find('.watch-later-button').each((i, el) => {
+        const button = el as HTMLButtonElement
+        const bvid = button.dataset.bvid
+        if (bvid && bvids.has(bvid)) {
+          setWatchLaterButtonState(button, 'saved')
+        }
+      })
+    })
+    .catch((error) => {
+      console.error('sync watch later buttons failed', error)
+    })
+}
+
+function markBvidAsWatchLater(watchLaterState: WatchLaterState, bvid: string) {
+  watchLaterState.pendingSavedBvids.add(bvid)
+  watchLaterState.bvids?.add(bvid)
+}
+
+function unmarkBvidAsWatchLater(watchLaterState: WatchLaterState, bvid: string) {
+  watchLaterState.pendingSavedBvids.delete(bvid)
+  watchLaterState.bvids?.delete(bvid)
+}
+
 function getBilibiliCsrfToken() {
   const match = document.cookie.match(/(?:^|;\s*)bili_jct=([^;]+)/)
   return match ? decodeURIComponent(match[1]) : null
@@ -588,7 +583,7 @@ async function addToWatchLater(bvid: string) {
     bvid,
     csrf,
   })
-  const resp = await fetch('https://api.bilibili.com/x/v2/history/toview/add', {
+  const resp = await fetch(WATCH_LATER_ADD_API_URL, {
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -602,24 +597,62 @@ async function addToWatchLater(bvid: string) {
   }
 }
 
-function setWatchLaterButtonState(button: HTMLButtonElement, state: 'idle'|'saving'|'saved'|'error', message?: string) {
+async function removeFromWatchLater(aid: string) {
+  const csrf = getBilibiliCsrfToken()
+  if (!csrf) {
+    throw new Error('未找到登录凭据')
+  }
+
+  const body = new URLSearchParams({
+    aid,
+    csrf,
+  })
+  const resp = await fetch(WATCH_LATER_REMOVE_API_URL, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  })
+  const result = await resp.json()
+  if (result.code !== 0) {
+    throw new Error(result.message || '取消保存失败')
+  }
+}
+
+function setWatchLaterButtonState(button: HTMLButtonElement, state: 'idle'|'saving'|'saved'|'removing'|'error', message?: string) {
+  const currentState = button.dataset.watchLaterState
   const label = button.querySelector('span:last-child')
   button.classList.remove('is-saving', 'is-saved', 'is-error')
-  button.disabled = state === 'saving' || state === 'saved'
+  button.disabled = state === 'saving' || state === 'removing'
+
+  if (state === 'idle' || state === 'saved') {
+    button.dataset.watchLaterState = state
+  }
 
   if (state === 'saving') {
     button.classList.add('is-saving')
     if (label) label.textContent = '保存中'
-    button.title = '正在保存到稍后再看'
+    button.title = '正在更新稍后再看状态'
+  } else if (state === 'removing') {
+    button.classList.add('is-saving')
+    if (label) label.textContent = '取消中'
+    button.title = '正在取消稍后再看'
   } else if (state === 'saved') {
     button.classList.add('is-saved')
     if (label) label.textContent = '已保存'
-    button.title = '已保存到稍后再看'
+    button.title = '已保存到稍后再看，点击取消'
   } else if (state === 'error') {
     button.classList.add('is-error')
     if (label) label.textContent = '重试'
     button.title = message || '保存失败，点击重试'
     button.disabled = false
+    if (currentState === 'saved') {
+      button.dataset.watchLaterState = 'saved'
+    } else {
+      button.dataset.watchLaterState = 'idle'
+    }
   } else {
     if (label) label.textContent = '稍后再看'
     button.title = '保存到稍后再看'

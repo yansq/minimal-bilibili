@@ -164,10 +164,7 @@ body {
     }
   }
   .feed-roll-btn {
-    position: fixed !important;
-    right: 0px !important;
-    left: auto !important;
-    top: 300px !important;
+    display: none !important;
   }
 }
 
@@ -369,133 +366,6 @@ body {
 
     .load-more {
       margin-left: 35px;
-    }
-  }
-}
-
-.player-dialog {
-  position: fixed;
-  width: 80vw;
-  left: calc(50% - 40vw);
-  top: 10vh;
-  padding: 0;
-  border: 0;
-  background-color: transparent;
-
-  // macbook pro 13 screen size: 1440x900
-  @media screen and (max-height: 900px) {
-    top: 20px;
-  }
-
-  &::backdrop {
-    background: rgba(100, 100, 100, 0.7);
-  }
-
-  #minimal-bilibili-player {
-    line-height: 0;
-
-    video {
-      width: 100%;
-      max-height: 70vh;
-      // dialog default border;
-      border: 3px solid #000;
-      background-color: #000;
-      &:focus {
-        outline: 0;
-        box-shadow: none;
-      }
-    }
-  }
-
-  .player-panel {
-    border: 3px solid #000;
-    margin-top: 20px;
-    background-color: #fff;
-    padding: 10px;
-    margin-bottom: 20px;
-    display: flex;
-    gap: 15px;
-
-    .video-info {
-      font-size: 14px;
-      flex-grow: 1;
-      .content {
-        display: flex;
-        flex-direction: column;
-        gap: 5px;
-      }
-
-      a:hover {
-        color: var(--brand_blue);
-      }
-      .title {
-        font-size: 18px;
-      }
-      .meta {
-        position: relative;
-        color: #aaa;
-        margin-left: -2px;
-
-        .value {
-          margin-right: 3px;
-        }
-
-        .icon {
-          position: relative;
-          top: 2px;
-          margin-right: 2px;
-        }
-
-        .with-sep:after {
-          content: "•";
-          display: inline-block;
-          margin: 0 10px;
-        }
-      }
-      .desc {
-        display: block;
-        word-wrap: break-word;
-        white-space: pre-wrap;
-        max-height: 90px;
-        overflow-y: auto;
-      }
-    }
-
-    .player-controls {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      min-width: 170px;
-      padding-top: 5px;
-
-      .item {
-        display: flex;
-        align-items: center;
-
-        label {
-          margin-right: 10px;
-          width: 30px;
-        }
-        input[type=range] {
-          width: 120px;
-        }
-      }
-    }
-  }
-  .top-right {
-    position: absolute;
-    top: 0; right: 0;
-    width: 100px;
-    height: 100px;
-    text-align: right;
-    padding: 15px;
-    .close-button {
-      font-size: 50px;
-      color: transparent;
-      transition: color 0.3s ease;
-    }
-    &:hover .close-button {
-      color: #fff;
     }
   }
 }
