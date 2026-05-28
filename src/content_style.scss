@@ -2,6 +2,7 @@
 
 :root {
   --search-container-width: 500px;
+  --dynamics-column-max-width: 620px;
 }
 
 @media screen and (max-width: 500px) {
@@ -114,15 +115,17 @@ body {
 .feed2 {
   margin-top: 80px;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 24px;
 
   // make recommend starts from the second column even at the very beginning
   .recommended-container_floor-aside {
     grid-column-start: 2;
+    min-width: 0;
   }
   .dynamics-container {
     grid-column-start: 1;
+    min-width: 0;
   }
 }
 
@@ -174,6 +177,9 @@ body {
   margin: 0 auto;
   font-size: 16px;
   padding-bottom: 50px;
+  width: 100%;
+  max-width: var(--dynamics-column-max-width);
+  min-width: 0;
 
   display: flex;
   justify-content: center;
@@ -212,6 +218,7 @@ body {
   .items {
     display: flex;
     flex-direction: column;
+    min-width: 0;
   }
 
   .dynamic-item {
@@ -219,6 +226,12 @@ body {
     color: #aaa;
     display: flex;
     position: relative;
+    min-width: 0;
+
+    .content {
+      min-width: 0;
+      max-width: 100%;
+    }
 
     .seq {
       display: block;
@@ -283,6 +296,9 @@ body {
       a {
         display: inline-block;
         padding-bottom: 1px;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }
       // background-color, child selector, sibling selector are not allowed in pseudo element
       a.visited,
